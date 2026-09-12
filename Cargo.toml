@@ -1,0 +1,12 @@
+[package]
+name = "crossword-grid"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Represent, validate, and number crossword grids"
+
+[lib]
+name = "crossword_grid"
+path = "src/lib.rs"
+
+[dependencies]
