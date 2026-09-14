@@ -39,6 +39,11 @@ for slot in grid.slots() {
 square, and any letter for an already-filled square. `Grid` implements
 `Display`, so printing a grid gives back the same text format.
 
+Call `grid.to_ipuz()` to get an [ipuz](http://www.ipuz.org) JSON string with
+the black-square layout, entry numbers, and (where known) the solution
+letters. There's no `.puz` export yet since that format needs a binary
+checksum layout rather than plain text.
+
 ## Numbering rule
 
 A white cell gets a number if it starts an across entry (nothing but a wall
@@ -49,9 +54,10 @@ bottom, matching the convention used in print crosswords.
 
 ## Status
 
-Early skeleton. Parsing, symmetry checking, and slot numbering work and are
-tested. Not yet handled: rendering a grid to a file format, generating grids
-from a word list, or clue management.
+Early skeleton. Parsing, symmetry checking, slot numbering, and ipuz export
+work and are tested. Not yet handled: `.puz` export, generating grids from a
+word list, clue management, non-rectangular grids, or an unchecked-cells
+report.
 
 ## License
 

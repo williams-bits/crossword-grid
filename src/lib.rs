@@ -1,6 +1,8 @@
 //! Crossword grid representation: parsing, symmetry checks, and slot numbering.
 
+use std::collections::HashMap;
 use std::fmt;
+use std::fmt::Write as _;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cell {
@@ -199,6 +201,70 @@ impl Grid {
         }
         slots
     }
+
+    /// Render the grid as ipuz JSON (see http://www.ipuz.org). ipuz is a
+    /// plain JSON format, so this writes it by hand rather than pulling in
+    /// a JSON crate; .puz would need a binary checksum layout that isn't
+    /// worth the complexity yet.
+    pub fn to_ipuz(&self) -> String {
+        let numbers: HashMap<(usize, usize), u32> = self
+            .slots()
+            .into_iter()
+            .map(|slot| ((slot.row, slot.col), slot.number))
+            .collect();
+
+        let mut out = String::new();
+        out.push_str("{\n");
+        out.push_str("  \"version\": \"http://ipuz.org/v2\",\n");
+        out.push_str("  \"kind\": [\"http://ipuz.org/crossword#1\"],\n");
+        let _ = writeln!(
+            out,
+            "  \"dimensions\": {{\"width\": {}, \"height\": {}}},",
+            self.width, self.height
+        );
+
+        out.push_str("  \"puzzle\": [\n");
+        for row in 0..self.height {
+            out.push_str("    [");
+            for col in 0..self.width {
+                if col > 0 {
+                    out.push_str(", ");
+                }
+                if self.is_black(row, col) {
+                    out.push_str("\"#\"");
+                } else if let Some(number) = numbers.get(&(row, col)) {
+                    let _ = write!(out, "{number}");
+                } else {
+                    out.push('0');
+                }
+            }
+            out.push(']');
+            out.push_str(if row + 1 < self.height { ",\n" } else { "\n" });
+        }
+        out.push_str("  ],\n");
+
+        out.push_str("  \"solution\": [\n");
+        for row in 0..self.height {
+            out.push_str("    [");
+            for col in 0..self.width {
+                if col > 0 {
+                    out.push_str(", ");
+                }
+                match self.cell(row, col) {
+                    Cell::Black => out.push_str("\"#\""),
+                    Cell::Filled(c) => {
+                        let _ = write!(out, "\"{c}\"");
+                    }
+                    Cell::Empty => out.push_str("null"),
+                }
+            }
+            out.push(']');
+            out.push_str(if row + 1 < self.height { ",\n" } else { "\n" });
+        }
+        out.push_str("  ]\n");
+        out.push('}');
+        out
+    }
 }
 
 impl fmt::Display for Grid {
@@ -271,6 +337,25 @@ mod tests {
         let grid = Grid::from_rows(&["##.", "...", "..."]).unwrap();
         let slots = grid.slots();
         assert!(slots.iter().all(|s| s.len > 1));
+    }
+
+    #[test]
+    fn ipuz_puzzle_grid_marks_blacks_and_numbers() {
+        let grid = Grid::from_rows(&["...", ".#.", "..."]).unwrap();
+        let json = grid.to_ipuz();
+        assert!(json.contains("\"dimensions\": {\"width\": 3, \"height\": 3}"));
+        assert!(json.contains("[1, 0, 2]"));
+        assert!(json.contains("[0, \"#\", 0]"));
+        assert!(json.contains("[3, 0, 0]"));
+    }
+
+    #[test]
+    fn ipuz_solution_uses_letters_and_null_for_blanks() {
+        let grid = Grid::from_rows(&["ab#", "c..", "###"]).unwrap();
+        let json = grid.to_ipuz();
+        assert!(json.contains("[\"A\", \"B\", \"#\"]"));
+        assert!(json.contains("[\"C\", null, null]"));
+        assert!(json.contains("[\"#\", \"#\", \"#\"]"));
     }
 
     #[test]
