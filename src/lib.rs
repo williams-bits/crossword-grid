@@ -51,6 +51,54 @@ impl fmt::Display for GridError {
 impl std::error::Error for GridError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PuzError {
+    /// .puz stores width and height as single bytes, so grids must be
+    /// between 1 and 255 in each dimension.
+    UnsupportedDimensions { width: usize, height: usize },
+    IncompleteSolution { row: usize, col: usize },
+    NonAsciiLetter { row: usize, col: usize, ch: char },
+    /// .puz stores the clue count as a 16-bit field.
+    TooManyClues { count: usize },
+}
+
+impl fmt::Display for PuzError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PuzError::UnsupportedDimensions { width, height } => write!(
+                f,
+                "grid is {width}x{height}, but .puz requires both dimensions between 1 and 255"
+            ),
+            PuzError::IncompleteSolution { row, col } => write!(
+                f,
+                ".puz needs a solution letter for every white cell, but ({row}, {col}) is empty"
+            ),
+            PuzError::NonAsciiLetter { row, col, ch } => write!(
+                f,
+                ".puz only supports ASCII letters, but ({row}, {col}) has '{ch}'"
+            ),
+            PuzError::TooManyClues { count } => write!(
+                f,
+                "grid has {count} clued entries, but .puz can only store up to {}",
+                u16::MAX
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PuzError {}
+
+/// The cyclic checksum used throughout the .puz format: rotate right one
+/// bit, carrying the low bit into the top, then add the next byte.
+fn puz_checksum(data: &[u8], seed: u16) -> u16 {
+    let mut sum = seed;
+    for &b in data {
+        sum = if sum & 1 == 1 { (sum >> 1) + 0x8000 } else { sum >> 1 };
+        sum = sum.wrapping_add(b as u16);
+    }
+    sum
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grid {
     width: usize,
     height: usize,
@@ -204,8 +252,7 @@ impl Grid {
 
     /// Render the grid as ipuz JSON (see http://www.ipuz.org). ipuz is a
     /// plain JSON format, so this writes it by hand rather than pulling in
-    /// a JSON crate; .puz would need a binary checksum layout that isn't
-    /// worth the complexity yet.
+    /// a JSON crate.
     pub fn to_ipuz(&self) -> String {
         let numbers: HashMap<(usize, usize), u32> = self
             .slots()
@@ -264,6 +311,118 @@ impl Grid {
         out.push_str("  ]\n");
         out.push('}');
         out
+    }
+
+    /// Render the grid as an Across Lite .puz file, ready to be solved.
+    ///
+    /// Every white cell must already hold its solution letter (that letter
+    /// becomes the answer key); the player-facing grid written into the
+    /// file is left blank, since .puz's "current state" board is meant to
+    /// be filled in by whoever solves the puzzle, not by this library.
+    /// Title, author, copyright, and clue text are all empty, since the
+    /// grid has no metadata or clue storage yet.
+    pub fn to_puz(&self) -> Result<Vec<u8>, PuzError> {
+        if self.width == 0 || self.height == 0 || self.width > 255 || self.height > 255 {
+            return Err(PuzError::UnsupportedDimensions {
+                width: self.width,
+                height: self.height,
+            });
+        }
+
+        let mut solution = Vec::with_capacity(self.width * self.height);
+        let mut fill = Vec::with_capacity(self.width * self.height);
+        for row in 0..self.height {
+            for col in 0..self.width {
+                match self.cell(row, col) {
+                    Cell::Black => {
+                        solution.push(b'.');
+                        fill.push(b'.');
+                    }
+                    Cell::Empty => return Err(PuzError::IncompleteSolution { row, col }),
+                    Cell::Filled(ch) => {
+                        if !ch.is_ascii_alphabetic() {
+                            return Err(PuzError::NonAsciiLetter { row, col, ch });
+                        }
+                        solution.push(ch as u8);
+                        fill.push(b'-');
+                    }
+                }
+            }
+        }
+
+        let slot_count = self.slots().len();
+        if slot_count > u16::MAX as usize {
+            return Err(PuzError::TooManyClues { count: slot_count });
+        }
+        let num_clues = slot_count as u16;
+
+        let mut cib = [0u8; 8];
+        cib[0] = self.width as u8;
+        cib[1] = self.height as u8;
+        cib[2..4].copy_from_slice(&num_clues.to_le_bytes());
+        cib[4..6].copy_from_slice(&1u16.to_le_bytes());
+        cib[6..8].copy_from_slice(&0u16.to_le_bytes());
+
+        let c_cib = puz_checksum(&cib, 0);
+        let c_sol = puz_checksum(&solution, 0);
+        let c_grid = puz_checksum(&fill, 0);
+
+        // Title, author, copyright, and notes are all empty; clues are all
+        // empty and, being zero-length, don't change the running checksum.
+        let mut c_part = puz_checksum(b"\0", 0);
+        c_part = puz_checksum(b"\0", c_part);
+        c_part = puz_checksum(b"\0", c_part);
+        c_part = puz_checksum(b"\0", c_part);
+
+        let mut c_full = c_cib;
+        c_full = puz_checksum(&solution, c_full);
+        c_full = puz_checksum(&fill, c_full);
+        c_full = puz_checksum(b"\0", c_full);
+        c_full = puz_checksum(b"\0", c_full);
+        c_full = puz_checksum(b"\0", c_full);
+        c_full = puz_checksum(b"\0", c_full);
+
+        // The masked checksum bytes are XORed against "ICHEATED", a fixed
+        // string every .puz reader checks for as a sanity marker.
+        let low_masks = [
+            0x49 ^ (c_cib & 0xFF) as u8,
+            0x43 ^ (c_sol & 0xFF) as u8,
+            0x48 ^ (c_grid & 0xFF) as u8,
+            0x45 ^ (c_part & 0xFF) as u8,
+        ];
+        let high_masks = [
+            0x41 ^ ((c_cib >> 8) & 0xFF) as u8,
+            0x54 ^ ((c_sol >> 8) & 0xFF) as u8,
+            0x45 ^ ((c_grid >> 8) & 0xFF) as u8,
+            0x44 ^ ((c_part >> 8) & 0xFF) as u8,
+        ];
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&c_full.to_le_bytes());
+        out.extend_from_slice(b"ACROSS&DOWN\0");
+        out.extend_from_slice(&c_cib.to_le_bytes());
+        out.extend_from_slice(&low_masks);
+        out.extend_from_slice(&high_masks);
+        out.extend_from_slice(b"1.3\0");
+        out.extend_from_slice(&[0u8; 2]); // reserved
+        out.extend_from_slice(&[0u8; 2]); // scrambled checksum (0: unscrambled)
+        out.extend_from_slice(&[0u8; 12]); // reserved
+        out.push(self.width as u8);
+        out.push(self.height as u8);
+        out.extend_from_slice(&num_clues.to_le_bytes());
+        out.extend_from_slice(&1u16.to_le_bytes()); // puzzle type: normal
+        out.extend_from_slice(&0u16.to_le_bytes()); // scrambled tag: unscrambled
+        out.extend_from_slice(&solution);
+        out.extend_from_slice(&fill);
+        out.push(0); // title
+        out.push(0); // author
+        out.push(0); // copyright
+        for _ in 0..num_clues {
+            out.push(0);
+        }
+        out.push(0); // notes
+
+        Ok(out)
     }
 }
 
@@ -356,6 +515,41 @@ mod tests {
         assert!(json.contains("[\"A\", \"B\", \"#\"]"));
         assert!(json.contains("[\"C\", null, null]"));
         assert!(json.contains("[\"#\", \"#\", \"#\"]"));
+    }
+
+    #[test]
+    fn puz_header_has_magic_string_and_dimensions() {
+        let grid = Grid::from_rows(&["cat", "ago", "tot"]).unwrap();
+        let bytes = grid.to_puz().unwrap();
+        assert_eq!(&bytes[0x02..0x0E], b"ACROSS&DOWN\0");
+        assert_eq!(bytes[0x2C], 3); // width
+        assert_eq!(bytes[0x2D], 3); // height
+    }
+
+    #[test]
+    fn puz_boards_hold_solution_and_blank_fill() {
+        let grid = Grid::from_rows(&["ca#", "ago", "#ot"]).unwrap();
+        let bytes = grid.to_puz().unwrap();
+        let board_len = 9;
+        let solution = &bytes[0x34..0x34 + board_len];
+        let fill = &bytes[0x34 + board_len..0x34 + 2 * board_len];
+        assert_eq!(solution, b"CA.AGO.OT");
+        assert_eq!(fill, b"--.---.--");
+    }
+
+    #[test]
+    fn puz_rejects_incomplete_solution() {
+        let grid = Grid::from_rows(&["..#", "...", "#.."]).unwrap();
+        let err = grid.to_puz().unwrap_err();
+        assert_eq!(err, PuzError::IncompleteSolution { row: 0, col: 0 });
+    }
+
+    #[test]
+    fn puz_clue_count_matches_slot_count() {
+        let grid = Grid::from_rows(&["cat", "ago", "tot"]).unwrap();
+        let bytes = grid.to_puz().unwrap();
+        let num_clues = u16::from_le_bytes([bytes[0x2E], bytes[0x2F]]);
+        assert_eq!(num_clues as usize, grid.slots().len());
     }
 
     #[test]

@@ -41,8 +41,14 @@ square, and any letter for an already-filled square. `Grid` implements
 
 Call `grid.to_ipuz()` to get an [ipuz](http://www.ipuz.org) JSON string with
 the black-square layout, entry numbers, and (where known) the solution
-letters. There's no `.puz` export yet since that format needs a binary
-checksum layout rather than plain text.
+letters.
+
+Call `grid.to_puz()` to get an Across Lite `.puz` file as raw bytes. Every
+white cell needs a solution letter first (`to_puz` returns an error
+otherwise); the player-facing grid in the file is written blank, since the
+puzzle is meant to be solved after export, not pre-solved by this library.
+Title, author, copyright, and clue text come out empty until clue storage
+exists.
 
 ## Numbering rule
 
@@ -54,10 +60,9 @@ bottom, matching the convention used in print crosswords.
 
 ## Status
 
-Early skeleton. Parsing, symmetry checking, slot numbering, and ipuz export
-work and are tested. Not yet handled: `.puz` export, generating grids from a
-word list, clue management, non-rectangular grids, or an unchecked-cells
-report.
+Early skeleton. Parsing, symmetry checking, slot numbering, and ipuz/`.puz`
+export work and are tested. Not yet handled: generating grids from a word
+list, clue management, non-rectangular grids, or an unchecked-cells report.
 
 ## License
 
