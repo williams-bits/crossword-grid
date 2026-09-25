@@ -1,6 +1,7 @@
 //! Crossword grid representation: parsing, symmetry checks, and slot numbering.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Write as _;
 
@@ -445,6 +446,142 @@ impl fmt::Display for Grid {
     }
 }
 
+/// A pool of candidate fill words, grouped by length so the solver can look
+/// up matches for a slot without scanning the whole list.
+#[derive(Debug, Clone, Default)]
+pub struct WordList {
+    by_length: HashMap<usize, Vec<String>>,
+}
+
+impl WordList {
+    /// Build a word list from any source of strings. Entries that aren't
+    /// pure ASCII letters are dropped rather than rejected outright, since a
+    /// real word list (e.g. a dictionary file) will always have a few lines
+    /// with punctuation or numbers mixed in.
+    pub fn new<I, S>(words: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut by_length: HashMap<usize, Vec<String>> = HashMap::new();
+        for word in words {
+            let word = word.as_ref();
+            if word.is_empty() || !word.chars().all(|c| c.is_ascii_alphabetic()) {
+                continue;
+            }
+            let upper: String = word.chars().map(|c| c.to_ascii_uppercase()).collect();
+            by_length.entry(upper.chars().count()).or_default().push(upper);
+        }
+        WordList { by_length }
+    }
+
+    fn candidates(&self, len: usize) -> &[String] {
+        self.by_length.get(&len).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FillError {
+    /// No combination of words from the list satisfies every slot and every
+    /// crossing constraint.
+    NoSolution,
+}
+
+impl fmt::Display for FillError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FillError::NoSolution => write!(f, "no fill satisfies every slot and crossing"),
+        }
+    }
+}
+
+impl std::error::Error for FillError {}
+
+fn slot_cells(slot: &Slot) -> Vec<(usize, usize)> {
+    (0..slot.len)
+        .map(|i| match slot.direction {
+            Direction::Across => (slot.row, slot.col + i),
+            Direction::Down => (slot.row + i, slot.col),
+        })
+        .collect()
+}
+
+/// Fill `slots[index..]` by backtracking: try each word of the right length
+/// that agrees with whatever letters are already sitting in the slot's
+/// cells (either given by the caller or placed by an earlier, crossing
+/// slot), place it, recurse, and undo on failure. `used` tracks words
+/// already placed so the same entry doesn't appear twice in one grid.
+fn backtrack_fill(
+    grid: &mut Grid,
+    slots: &[Slot],
+    index: usize,
+    word_list: &WordList,
+    used: &mut HashSet<String>,
+) -> bool {
+    let Some(slot) = slots.get(index) else {
+        return true;
+    };
+    let cells = slot_cells(slot);
+    let pattern: Vec<Option<char>> = cells
+        .iter()
+        .map(|&(row, col)| match grid.cell(row, col) {
+            Cell::Filled(ch) => Some(ch),
+            Cell::Empty => None,
+            Cell::Black => unreachable!("slot cells are never black"),
+        })
+        .collect();
+
+    for word in word_list.candidates(slot.len) {
+        if used.contains(word) {
+            continue;
+        }
+        let letters: Vec<char> = word.chars().collect();
+        let matches = pattern
+            .iter()
+            .zip(&letters)
+            .all(|(existing, ch)| existing.map_or(true, |e| e == *ch));
+        if !matches {
+            continue;
+        }
+
+        let mut placed = Vec::new();
+        for (&(row, col), &ch) in cells.iter().zip(&letters) {
+            if let Cell::Empty = grid.cell(row, col) {
+                grid.set(row, col, Cell::Filled(ch));
+                placed.push((row, col));
+            }
+        }
+        used.insert(word.clone());
+
+        if backtrack_fill(grid, slots, index + 1, word_list, used) {
+            return true;
+        }
+
+        used.remove(word);
+        for (row, col) in placed {
+            grid.set(row, col, Cell::Empty);
+        }
+    }
+
+    false
+}
+
+impl Grid {
+    /// Fill every empty white cell using words from `word_list`, respecting
+    /// any letters already placed and every across/down crossing. Returns a
+    /// new grid on success; the receiver is left untouched either way.
+    pub fn fill(&self, word_list: &WordList) -> Result<Grid, FillError> {
+        let mut grid = self.clone();
+        let slots = grid.slots();
+        let mut used = HashSet::new();
+        if backtrack_fill(&mut grid, &slots, 0, word_list, &mut used) {
+            Ok(grid)
+        } else {
+            Err(FillError::NoSolution)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +696,54 @@ mod tests {
         let rows: Vec<&str> = text.lines().collect();
         let reparsed = Grid::from_rows(&rows).unwrap();
         assert_eq!(grid, reparsed);
+    }
+
+    #[test]
+    fn fills_grid_from_word_list() {
+        let grid = Grid::from_rows(&["...", ".#.", "..."]).unwrap();
+        let words = WordList::new(["cat", "cab", "tin", "bun"]);
+        let filled = grid.fill(&words).unwrap();
+        for row in 0..filled.height() {
+            for col in 0..filled.width() {
+                if (row, col) == (1, 1) {
+                    assert_eq!(filled.cell(row, col), Cell::Black);
+                } else {
+                    assert!(matches!(filled.cell(row, col), Cell::Filled(_)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fill_respects_existing_letters() {
+        let grid = Grid::from_rows(&["c..", ".#.", "..."]).unwrap();
+        let words = WordList::new(["cat", "cab", "tin", "bun"]);
+        let filled = grid.fill(&words).unwrap();
+        assert_eq!(filled.cell(0, 0), Cell::Filled('C'));
+        assert_eq!(filled.cell(0, 1), Cell::Filled('A'));
+        assert_eq!(filled.cell(0, 2), Cell::Filled('T'));
+    }
+
+    #[test]
+    fn fill_avoids_duplicate_words() {
+        // The two across entries don't cross, so without a uniqueness check
+        // both would happily fill in as "cat" from the same single-word list.
+        let grid = Grid::from_rows(&["...", "###", "..."]).unwrap();
+        let words = WordList::new(["cat"]);
+        assert_eq!(grid.fill(&words).unwrap_err(), FillError::NoSolution);
+    }
+
+    #[test]
+    fn fill_fails_without_a_matching_word() {
+        let grid = Grid::from_rows(&["...", "...", "..."]).unwrap();
+        let words = WordList::new(["ab", "cd"]);
+        assert_eq!(grid.fill(&words).unwrap_err(), FillError::NoSolution);
+    }
+
+    #[test]
+    fn word_list_drops_non_alphabetic_entries() {
+        let words = WordList::new(["cat", "c-t", "", "dog2"]);
+        assert_eq!(words.candidates(3), ["CAT"]);
+        assert!(words.candidates(4).is_empty());
     }
 }

@@ -50,6 +50,30 @@ puzzle is meant to be solved after export, not pre-solved by this library.
 Title, author, copyright, and clue text come out empty until clue storage
 exists.
 
+## Fill generator
+
+`WordList::new` builds a pool of candidate words from any iterable of
+strings, grouped by length. `Grid::fill` then backtracks through the grid's
+slots, trying words that agree with whatever letters are already present
+(either pre-filled by the caller or placed by an earlier, crossing slot),
+and returns a new, fully-lettered grid:
+
+```rust
+use crossword_grid::{Grid, WordList};
+
+let grid = Grid::from_rows(&["...", ".#.", "..."])?;
+let words = WordList::new(["cat", "cab", "tin", "bun"]);
+let filled = grid.fill(&words)?;
+println!("{filled}");
+```
+
+The search also enforces the usual crossword rule that no word appears
+twice in the same grid. If no combination of words satisfies every slot and
+crossing, `fill` returns `FillError::NoSolution`. It's a plain depth-first
+backtracking search with no heuristics for slot ordering, so it works fine
+for typical daily-size grids but isn't tuned for wide-open grids with a
+small word list.
+
 ## Numbering rule
 
 A white cell gets a number if it starts an across entry (nothing but a wall
@@ -60,9 +84,9 @@ bottom, matching the convention used in print crosswords.
 
 ## Status
 
-Early skeleton. Parsing, symmetry checking, slot numbering, and ipuz/`.puz`
-export work and are tested. Not yet handled: generating grids from a word
-list, clue management, non-rectangular grids, or an unchecked-cells report.
+Early skeleton. Parsing, symmetry checking, slot numbering, ipuz/`.puz`
+export, and word-list-backed fill all work and are tested. Not yet handled:
+clue management, non-rectangular grids, or an unchecked-cells report.
 
 ## License
 
